@@ -7,7 +7,7 @@ function isValidId(id) {
 }
 // === API LẤY TỔNG CHI TIÊU CÁ NHÂN (Chỉ từ bảng Expense) ===
 // GET /api/auth/expenses/personal/total/:userId
-router.get("/expenses/personal/total/:userId", async (req, res) => {
+router.get("/personal/total/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
     if (!isValidId(userId)) {
@@ -32,7 +32,7 @@ router.get("/expenses/personal/total/:userId", async (req, res) => {
 });
 
 // GET /api/expenses/personal/monthly-summary/:userId?month=YYYY-MM
-router.get("/expenses/personal/monthly-summary/:userId", async (req, res) => {
+router.get("/personal/monthly-summary/:userId", async (req, res) => {
   const { userId } = req.params;
   const { month } = req.query; // "2025-05"
   if (!userId || !month) {
