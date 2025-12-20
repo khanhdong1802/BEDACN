@@ -8,10 +8,267 @@ const GroupContribution = require("../models/GroupContribution");
 const GroupExpense = require("../models/GroupExpense");
 const GroupFund = require("../models/GroupFund");
 const TransactionHistory = require("../models/TransactionHistory");
+//const { isValidId } = require("../utils/validate");
+const Notification = require("../models/Notification");
 const mongoose = require("mongoose");
 function isValidId(id) {
   return mongoose.Types.ObjectId.isValid(id);
 }
+//=========================================================
+// POST /api/group/invitations
+router.post("/invitations", async (req, res) => {
+  try {
+    const { name, description, created_by, memberEmail } = req.body;
+
+    if (!name || !created_by) {
+      return res.status(400).json({ message: "Thiếu name hoặc created_by" });
+    }
+
+    let invitedUser = null;
+    if (memberEmail) {
+      invitedUser = await User.findOne({ email: memberEmail });
+      if (!invitedUser) {
+        return res
+          .status(404)
+          .json({ message: "Không tìm thấy user với email này" });
+      }
+    }
+
+    const group = await Group.create({
+      name,
+      description: description || "",
+      created_by,
+      status: "pending",
+    });
+
+    await GroupMember.create({
+      group_id: group._id,
+      user_id: created_by,
+      role: "admin",
+      status: "active",
+    });
+
+    if (invitedUser) {
+      await Notification.create({
+        userId: invitedUser._id,
+        type: "group_invite",
+        message: `Bạn được mời vào nhóm "${group.name}"`,
+        groupId: group._id, // ✅ lưu phẳng đúng schema
+        groupName: group.name, // ✅
+        // invitedBy: created_by, // nếu bạn có thêm field này trong schema
+      });
+    }
+
+    return res.status(201).json({
+      message: "Đã tạo nhóm ở trạng thái chờ xác nhận & gửi lời mời",
+      group,
+    });
+  } catch (err) {
+    console.error("Lỗi tạo group invite:", err);
+    res.status(500).json({ message: "Lỗi máy chủ khi tạo lời mời nhóm" });
+  }
+});
+
+//------------------------------------------------------------------------------------------
+// GET /api/notifications?userId=...
+router.get("/notifications", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({ message: "Thiếu userId" });
+    }
+
+    const notis = await Notification.find({ userId, status: "pending" }).sort({
+      createdAt: -1,
+    });
+
+    return res.json(notis);
+  } catch (err) {
+    console.error("Lỗi GET /notifications:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// POST /api/notifications/:id/accept
+router.post("/notifications/:id/accept", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const noti = await Notification.findByIdAndUpdate(
+      id,
+      { status: "accepted" },
+      { new: true }
+    );
+
+    if (!noti) {
+      return res.status(404).json({ message: "Không tìm thấy thông báo" });
+    }
+
+    // TODO: nếu muốn, ở đây bạn có thể:
+    // - thêm user vào GroupMember
+    // - cập nhật trạng thái group từ pending -> active
+    // (dùng noti.groupId, noti.userId)
+
+    return res.json({ message: "Đã chấp nhận lời mời", notification: noti });
+  } catch (err) {
+    console.error("Lỗi accept notification:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// POST /api/notifications/:id/reject
+router.post("/notifications/:id/reject", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const noti = await Notification.findByIdAndUpdate(
+      id,
+      { status: "rejected" },
+      { new: true }
+    );
+
+    if (!noti) {
+      return res.status(404).json({ message: "Không tìm thấy thông báo" });
+    }
+
+    return res.json({ message: "Đã từ chối lời mời", notification: noti });
+  } catch (err) {
+    console.error("Lỗi reject notification:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// POST /api/group/invitations/:notiId/accept
+router.post("/invitations/:notiId/accept", async (req, res) => {
+  try {
+    const { notiId } = req.params;
+    const { userId } = req.body;
+
+    const noti = await Notification.findById(notiId);
+    if (!noti || noti.type !== "group_invite") {
+      return res.status(404).json({ message: "Không tìm thấy lời mời" });
+    }
+
+    const groupId = noti.groupId; // ✅ lấy từ field schema
+    if (!groupId) {
+      return res.status(400).json({ message: "Lời mời không hợp lệ" });
+    }
+
+    await GroupMember.findOneAndUpdate(
+      { group_id: groupId, user_id: userId },
+      { group_id: groupId, user_id: userId, role: "member", status: "active" },
+      { upsert: true, new: true }
+    );
+
+    await Group.findByIdAndUpdate(groupId, { status: "active" });
+
+    noti.status = "accepted"; // ✅ đúng enum
+    await noti.save();
+
+    res.json({ message: "Đã chấp nhận lời mời & tham gia nhóm", groupId });
+  } catch (err) {
+    console.error("Lỗi accept invite:", err);
+    res.status(500).json({ message: "Lỗi máy chủ khi chấp nhận lời mời" });
+  }
+});
+
+// POST /api/group/invitations/:notiId/reject
+router.post("/invitations/:notiId/reject", async (req, res) => {
+  try {
+    const { notiId } = req.params;
+    const noti = await Notification.findById(notiId);
+    if (!noti)
+      return res.status(404).json({ message: "Không tìm thấy lời mời" });
+
+    noti.status = "rejected"; // ✅ đúng enum
+    await noti.save();
+
+    res.json({ message: "Đã từ chối lời mời" });
+  } catch (err) {
+    console.error("Lỗi reject invite:", err);
+    res.status(500).json({ message: "Lỗi máy chủ khi từ chối lời mời" });
+  }
+});
+
+//------------------------------------------------------------------------------------------
+// GET /api/auth/groups/:groupId/members
+router.get("/groups/:groupId/members", async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    if (!isValidId(groupId)) {
+      return res.status(400).json({ message: "ID nhóm không hợp lệ" });
+    }
+    const members = await GroupMember.find({ group_id: groupId })
+      .populate("user_id", "name email")
+      .sort({ createdAt: 1 });
+    res.json({ members });
+  } catch (err) {
+    res.status(500).json({ message: "Lỗi máy chủ khi lấy thành viên nhóm" });
+  }
+});
+
+// POST /api/auth/groups/:groupId/members
+router.post("/groups/:groupId/members", async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const { email } = req.body;
+    if (!isValidId(groupId) || !email) {
+      return res.status(400).json({ message: "Thiếu thông tin" });
+    }
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res
+        .status(404)
+        .json({ message: "Không tìm thấy user với email này" });
+    }
+    // Kiểm tra đã là thành viên chưa
+    const existed = await GroupMember.findOne({
+      group_id: groupId,
+      user_id: user._id,
+    });
+    if (existed) {
+      return res
+        .status(400)
+        .json({ message: "Người dùng đã là thành viên nhóm" });
+    }
+    const newMember = await GroupMember.create({
+      group_id: groupId,
+      user_id: user._id,
+      role: "member",
+      status: "active",
+    });
+    res.status(201).json({ message: "Đã thêm thành viên", member: newMember });
+  } catch (err) {
+    res.status(500).json({ message: "Lỗi máy chủ khi thêm thành viên" });
+  }
+});
+
+router.delete("/groups/:groupId/members/:memberUserId", async (req, res) => {
+  console.log(">>> DELETE member route HIT", req.params);
+
+  try {
+    const { groupId, memberUserId } = req.params;
+    if (!isValidId(groupId) || !isValidId(memberUserId)) {
+      return res.status(400).json({ message: "ID không hợp lệ" });
+    }
+
+    const deleted = await GroupMember.findOneAndDelete({
+      group_id: groupId,
+      user_id: memberUserId, // <–– so sánh theo user_id
+    });
+
+    if (!deleted) {
+      return res
+        .status(404)
+        .json({ message: "Không tìm thấy thành viên trong nhóm" });
+    }
+    res.json({ message: "Đã xóa thành viên khỏi nhóm" });
+  } catch (err) {
+    console.error("Lỗi xóa thành viên:", err);
+    res.status(500).json({ message: "Lỗi máy chủ khi xóa thành viên" });
+  }
+});
+
 // POST /api/groups/createAdd commentMore actions
 router.post("/create", async (req, res) => {
   try {
@@ -532,4 +789,185 @@ router.get("/groups/:groupId/actual-balance", async (req, res) => {
       .json({ success: false, message: "Lỗi máy chủ khi tính số dư nhóm." });
   }
 });
+
+// ...existing code...
+//------------------------------------------------------------------------------------------
+// GET /api/auth/groups/:groupId/member-expenses
+router.get("/groups/:groupId/member-expenses", async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    if (!isValidId(groupId)) {
+      return res.status(400).json({ message: "ID nhóm không hợp lệ" });
+    }
+
+    // Lấy tất cả GroupMember của nhóm
+    const members = await GroupMember.find({ group_id: groupId }).populate(
+      "user_id",
+      "name email"
+    );
+
+    // Lấy tất cả fund_id của nhóm
+    const funds = await GroupFund.find({ group_id: groupId }).select("_id");
+    const fundIds = funds.map((f) => f._id);
+
+    // Gom nhóm chi tiêu theo user
+    const expenses = await GroupExpense.aggregate([
+      { $match: { fund_id: { $in: fundIds } } },
+      {
+        $lookup: {
+          from: "groupmembers",
+          localField: "member_id",
+          foreignField: "_id",
+          as: "member",
+        },
+      },
+      { $unwind: "$member" },
+      {
+        $group: {
+          _id: "$member.user_id",
+          total: { $sum: "$amount" },
+        },
+      },
+    ]);
+
+    // Map user info vào kết quả
+    const result = members.map((m) => {
+      const found = expenses.find(
+        (e) => e._id && e._id.toString() === m.user_id._id.toString()
+      );
+      return {
+        user_id: m.user_id._id,
+        name: m.user_id.name,
+        email: m.user_id.email,
+        totalSpent: found ? found.total : 0,
+      };
+    });
+
+    res.json({ members: result });
+  } catch (err) {
+    console.error("Lỗi khi lấy chi tiêu nhóm của thành viên:", err);
+    res
+      .status(500)
+      .json({ message: "Lỗi máy chủ khi lấy chi tiêu nhóm của thành viên" });
+  }
+});
+
+// Cập nhật nhóm
+router.patch("/groups/:id", async (req, res) => {
+  const { id } = req.params;
+  const { name, description, status } = req.body;
+
+  try {
+    const updatedGroup = await Group.findByIdAndUpdate(
+      id,
+      { name, description, status },
+      { new: true }
+    );
+    if (!updatedGroup)
+      return res.status(404).json({ message: "Nhóm không tồn tại" });
+
+    res.json(updatedGroup);
+  } catch (err) {
+    console.error("Lỗi cập nhật nhóm:", err);
+    res.status(500).json({ message: "Lỗi máy chủ khi cập nhật nhóm" });
+  }
+});
+
+// Xóa nhóm
+router.delete("/groups/:id", async (req, res) => {
+  const { id } = req.params;
+
+  // Kiểm tra tính hợp lệ của id
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    console.log("ID nhóm không hợp lệ:", id); // Log nếu ID không hợp lệ
+    return res.status(400).json({ message: "ID nhóm không hợp lệ" });
+  }
+
+  try {
+    const deletedGroup = await Group.findByIdAndDelete(id);
+    if (!deletedGroup) {
+      console.log("Nhóm không tồn tại:", id); // Log nếu nhóm không tìm thấy
+      return res.status(404).json({ message: "Nhóm không tồn tại" });
+    }
+
+    // Xóa các liên kết liên quan
+    await GroupMember.deleteMany({ group_id: id });
+    await GroupFund.deleteMany({ group_id: id });
+    await GroupContribution.deleteMany({
+      fund_id: {
+        $in: (await GroupFund.find({ group_id: id })).map((f) => f._id),
+      },
+    });
+    await GroupExpense.deleteMany({
+      fund_id: {
+        $in: (await GroupFund.find({ group_id: id })).map((f) => f._id),
+      },
+    });
+
+    console.log("Nhóm đã bị xóa thành công:", id); // Log khi nhóm xóa thành công
+    res.json({ message: "Nhóm đã bị xóa thành công" });
+  } catch (err) {
+    console.error("Lỗi khi xóa nhóm:", err); // Log lỗi khi xóa nhóm
+    res.status(500).json({ message: "Lỗi máy chủ khi xóa nhóm" });
+  }
+});
+
+// GET /api/group/groups/all - lấy tất cả nhóm kèm thông tin người tạo, số thành viên và số dư
+router.get("/groups/all", async (req, res) => {
+  try {
+    const groups = await Group.find()
+      .populate("created_by", "name email")
+      .lean();
+
+    const enriched = await Promise.all(
+      groups.map(async (g) => {
+        const memberCount = await GroupMember.countDocuments({
+          group_id: g._id,
+        });
+
+        const funds = await GroupFund.find({ group_id: g._id }).select("_id");
+        const fundIds = funds.map((f) => f._id);
+
+        let balance = 0;
+        if (fundIds.length > 0) {
+          const contrib = await GroupContribution.aggregate([
+            {
+              $match: {
+                fund_id: { $in: fundIds },
+                status: { $in: ["pending", "confirmed", "completed"] },
+              },
+            },
+            { $group: { _id: null, total: { $sum: "$amount" } } },
+          ]);
+          const expenses = await GroupExpense.aggregate([
+            {
+              $match: {
+                fund_id: { $in: fundIds },
+                approval_status: "approved",
+              },
+            },
+            { $group: { _id: null, total: { $sum: "$amount" } } },
+          ]);
+          const totalContrib = contrib[0]?.total || 0;
+          const totalExpenses = expenses[0]?.total || 0;
+          balance = totalContrib - totalExpenses;
+        }
+
+        return {
+          id: g._id,
+          name: g.name,
+          owner: g.created_by ? g.created_by.name : null,
+          members: memberCount,
+          balance,
+        };
+      })
+    );
+
+    res.json({ groups: enriched });
+  } catch (err) {
+    console.error("❌ Lỗi khi lấy tất cả nhóm:", err);
+    res.status(500).json({ message: "Lỗi máy chủ" });
+  }
+});
+
 module.exports = router;

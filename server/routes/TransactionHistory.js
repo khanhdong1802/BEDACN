@@ -8,20 +8,47 @@ const User = require("../models/User");
 router.get("/user/:userId", async (req, res) => {
   const { userId } = req.params;
   const { date } = req.query;
-  let filter = { user_id: userId };
-  if (date) {
-    const start = new Date(date + "T00:00:00.000Z");
-    const end = new Date(date + "T23:59:59.999Z");
-    filter.transaction_date = { $gte: start, $lte: end };
+  const filter = {};
+
+  // convert userId safely
+  if (mongoose.Types.ObjectId.isValid(userId)) {
+    filter.user_id = new mongoose.Types.ObjectId(userId);
+  } else {
+    filter.user_id = userId;
   }
+
+  if (date) {
+    // accept YYYY-MM-DD only
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res
+        .status(400)
+        .json({ message: "Invalid date format. Use YYYY-MM-DD" });
+    }
+    try {
+      const [y, m, d] = date.split("-").map((v) => parseInt(v, 10));
+      const start = new Date(Date.UTC(y, m - 1, d, 0, 0, 0));
+      const end = new Date(Date.UTC(y, m - 1, d, 23, 59, 59, 999));
+      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+        return res.status(400).json({ message: "Invalid date value" });
+      }
+      filter.transaction_date = { $gte: start, $lte: end };
+    } catch (err) {
+      console.error("Date parse error:", err);
+      return res.status(400).json({ message: "Invalid date" });
+    }
+  }
+
   try {
-    const history = await TransactionHistory.find({ user_id: userId })
-      .populate("user_id", "name email") // Lấy tên người thực hiện
-      .populate("category_id", "name") // Lấy tên danh mục (nếu có)
+    const history = await TransactionHistory.find(filter)
+      .populate("user_id", "name email")
+      .populate("category_id", "name")
       .sort({ transaction_date: -1 });
-    res.json(history);
+    return res.json(history);
   } catch (err) {
-    res.status(500).json({ message: "Lỗi máy chủ khi lấy lịch sử giao dịch" });
+    console.error("Error fetching transaction history:", err);
+    return res
+      .status(500)
+      .json({ message: "Server error fetching transaction history" });
   }
 });
 
