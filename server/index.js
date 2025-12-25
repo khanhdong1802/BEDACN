@@ -30,7 +30,7 @@ const connectDB = async () => {
 
 connectDB();
 
-app.use(express.json()); // ✅ để xử lý req.body
+app.use(express.json({ limit: '10mb' })); // ✅ để xử lý req.body với giới hạn 10MB
 
 app.use("/api/auth", authRouter); // ✅ sử dụng route
 

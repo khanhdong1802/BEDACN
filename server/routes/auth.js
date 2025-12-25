@@ -174,6 +174,7 @@ router.post("/login", async (req, res) => {
         name: user.name,
         role: user.role,
         locked: user.locked,
+        avatar: user.avatar,
       },
     });
   } catch (err) {
@@ -305,8 +306,8 @@ router.get("/balance/:userId", async (req, res) => {
 // ========================
 router.put("/update/:id", async (req, res) => {
   try {
-    const { name, email, password } = req.body;
-    const updateData = { name, email };
+    const { name, email, password, avatar } = req.body;
+    const updateData = { name, email, avatar };
     // Nếu có mật khẩu mới thì mã hóa rồi cập nhật
     if (password && password.trim() !== "") {
       updateData.password = await argon2.hash(password);
@@ -341,6 +342,7 @@ router.put("/update/:id", async (req, res) => {
         _id: updatedUser._id,
         name: updatedUser.name,
         email: updatedUser.email,
+        avatar: updatedUser.avatar,
       },
     });
   } catch (err) {

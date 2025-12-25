@@ -16,6 +16,10 @@ const UserSchema = new Schema({
   phone: {
     type: String,
   },
+  avatar: {
+    type: String,
+    default: null,
+  },
 
   // CHỈ required khi là tài khoản local (không phải Google)
   password: {

@@ -201,7 +201,18 @@ router.get("/groups/:groupId/members", async (req, res) => {
     const members = await GroupMember.find({ group_id: groupId })
       .populate("user_id", "name email")
       .sort({ createdAt: 1 });
-    res.json({ members });
+
+    // Transform members to use 'id' instead of '_id' to avoid type issues
+    const transformedMembers = members.map((member) => ({
+      id: member._id.toString(),
+      group_id: member.group_id,
+      user_id: member.user_id,
+      role: member.role,
+      status: member.status,
+      createdAt: member.createdAt,
+    }));
+
+    res.json({ members: transformedMembers });
   } catch (err) {
     res.status(500).json({ message: "Lỗi máy chủ khi lấy thành viên nhóm" });
   }
