@@ -104,10 +104,21 @@ router.post("/notifications/:id/accept", async (req, res) => {
       return res.status(404).json({ message: "Không tìm thấy thông báo" });
     }
 
-    // TODO: nếu muốn, ở đây bạn có thể:
-    // - thêm user vào GroupMember
-    // - cập nhật trạng thái group từ pending -> active
-    // (dùng noti.groupId, noti.userId)
+    // <<<--- BẮT ĐẦU THÊM CODE MỚI --- >>>
+    // 1. Kiểm tra xem thông báo có hợp lệ không
+    if (noti.type === 'group_invite' && noti.groupId && noti.userId) {
+      
+      // 2. Thêm người dùng vào GroupMember
+      await GroupMember.findOneAndUpdate(
+        { group_id: noti.groupId, user_id: noti.userId },
+        { group_id: noti.groupId, user_id: noti.userId, role: "member", status: "active" },
+        { upsert: true, new: true } // upsert: true sẽ tạo mới nếu chưa tồn tại
+      );
+
+      // 3. (Tùy chọn) Kích hoạt nhóm nếu nó đang ở trạng thái chờ
+      await Group.findByIdAndUpdate(noti.groupId, { status: "active" });
+    }
+    // <<<--- KẾT THÚC CODE MỚI --- >>>
 
     return res.json({ message: "Đã chấp nhận lời mời", notification: noti });
   } catch (err) {
