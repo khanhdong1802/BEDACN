@@ -2,11 +2,17 @@ const express = require("express");
 const router = express.Router();
 const argon2 = require("argon2");
 const jwt = require("jsonwebtoken");
+
+
 const Income = require("../models/Income");
 const Expense = require("../models/Expense");
 const User = require("../models/User");
 const TransactionHistory = require("../models/TransactionHistory");
+
 const { OAuth2Client } = require("google-auth-library");
+
+const upload = require("../middlewares/uploadAvatar");
+
 const client = new OAuth2Client(
   "41306821288-t244srfpqp5dnp6d9i9skap2u4p89ccm.apps.googleusercontent.com"
 );
@@ -304,25 +310,37 @@ router.get("/balance/:userId", async (req, res) => {
 // ========================
 // PUT /api/auth/update/:id
 // ========================
-router.put("/update/:id", async (req, res) => {
+router.put("/update/:id", upload.single("avatar"), async (req, res) => {
   try {
-    const { name, email, password, avatar } = req.body;
-    const updateData = { name, email, avatar };
-    // Nếu có mật khẩu mới thì mã hóa rồi cập nhật
+    const { name, email, password, phone } = req.body;
+
+    const updateData = {};
+
+    if (name) updateData.name = name;
+    if (email) updateData.email = email;
+    if (phone) updateData.phone = phone;
+
+    // hash password
     if (password && password.trim() !== "") {
       updateData.password = await argon2.hash(password);
     }
 
-    // Kiểm tra email đã tồn tại cho user khác chưa (nếu đổi email)
+    // upload avatar -> lưu URL
+    if (req.file) {
+      updateData.avatar = `/uploads/avatars/${req.file.filename}`;
+    }
+
+    // check email trùng
     if (email) {
       const existing = await User.findOne({
         email,
         _id: { $ne: req.params.id },
       });
+
       if (existing) {
-        return res
-          .status(400)
-          .json({ message: "Email đã được sử dụng bởi tài khoản khác" });
+        return res.status(400).json({
+          message: "Email đã được sử dụng bởi tài khoản khác",
+        });
       }
     }
 
@@ -342,9 +360,11 @@ router.put("/update/:id", async (req, res) => {
         _id: updatedUser._id,
         name: updatedUser.name,
         email: updatedUser.email,
+        phone: updatedUser.phone,
         avatar: updatedUser.avatar,
       },
     });
+
   } catch (err) {
     console.error("❌ Lỗi cập nhật user:", err);
     res.status(500).json({ message: "Có lỗi xảy ra khi cập nhật" });
@@ -516,90 +536,62 @@ router.get("/expenses/personal/monthly-summary/:userId", async (req, res) => {
 router.get("/stats/overview/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
+
     if (!mongoose.Types.ObjectId.isValid(userId)) {
-      return res
-        .status(400)
-        .json({ success: false, message: "ID người dùng không hợp lệ." });
+      return res.status(400).json({
+        success: false,
+        message: "ID người dùng không hợp lệ.",
+      });
     }
+
     const userObjectId = new mongoose.Types.ObjectId(userId);
 
-    const fmt2 = (n) => Math.round(n * 100) / 100; // 2 decimals
+    const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+    const clamp = (n, min, max) => Math.min(Math.max(n, min), max);
 
-    // helper percent change (returns numeric rounded to 2 decimals)
-    const percentChangeValue = (current, previous) => {
+    // % thay đổi: nếu kỳ trước = 0 thì trả null để FE tự hiện "Mới phát sinh"
+    const calcPercentChange = (current, previous) => {
       const c = Number(current) || 0;
       const p = Number(previous) || 0;
-      if (p === 0) return c === 0 ? 0 : 100;
-      const raw = ((c - p) / Math.abs(p)) * 100;
-      return fmt2(raw);
-    };
-    const percentChangeString = (current, previous) => {
-      const v = percentChangeValue(current, previous);
-      return `${v > 0 ? "+" : ""}${v}%`;
+
+      if (p === 0) {
+        if (c === 0) return 0;
+        return null;
+      }
+
+      return round2(((c - p) / Math.abs(p)) * 100);
     };
 
-    // --- Spending today (from TransactionHistory) ---
-    const startToday = new Date();
+    const getDirection = (current, previous) => {
+      const c = Number(current) || 0;
+      const p = Number(previous) || 0;
+
+      if (c > p) return "up";
+      if (c < p) return "down";
+      return "flat";
+    };
+
+    const formatTrend = (percent) => {
+      if (percent === null || percent === undefined) return null;
+      return `${percent > 0 ? "+" : ""}${percent}%`;
+    };
+
+    const now = new Date();
+
+    // ===== Today / Yesterday =====
+    const startToday = new Date(now);
     startToday.setHours(0, 0, 0, 0);
-    const endToday = new Date();
+
+    const endToday = new Date(now);
     endToday.setHours(23, 59, 59, 999);
 
     const startYesterday = new Date(startToday);
     startYesterday.setDate(startYesterday.getDate() - 1);
+
     const endYesterday = new Date(startYesterday);
     endYesterday.setHours(23, 59, 59, 999);
 
-    const todayAgg = await TransactionHistory.aggregate([
-      {
-        $match: {
-          user_id: userObjectId,
-          transaction_type: "expense",
-          transaction_date: { $gte: startToday, $lte: endToday },
-        },
-      },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]);
-    const yesterdayAgg = await TransactionHistory.aggregate([
-      {
-        $match: {
-          user_id: userObjectId,
-          transaction_type: "expense",
-          transaction_date: { $gte: startYesterday, $lte: endYesterday },
-        },
-      },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]);
-    const spendingToday = todayAgg[0]?.total || 0;
-    const spendingYesterday = yesterdayAgg[0]?.total || 0;
-
-    // --- Total balance (all incomes - all expenses) ---
-    const totalIncomeAgg = await Income.aggregate([
-      {
-        $match: {
-          user_id: userObjectId,
-          amount: { $gte: 0 },
-        },
-      },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]);
-    const totalExpenseAgg = await Expense.aggregate([
-      { $match: { user_id: userObjectId } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]);
-    const totalIncomeAll = totalIncomeAgg[0]?.total || 0;
-    const totalExpenseAll = totalExpenseAgg[0]?.total || 0;
-    const balance = totalIncomeAll - totalExpenseAll;
-
-    // Spending today percent relative to balance (2 decimals). If balance <=0 => null
-    let spendingTodayPercent = null;
-    if (balance > 0) {
-      spendingTodayPercent = fmt2((spendingToday / balance) * 100);
-    } else {
-      spendingTodayPercent = null;
-    }
-
-    // --- Savings this month and last month ---
-    const now = new Date();
+    // ===== This month / Last month =====
     const startThisMonth = new Date(
       now.getFullYear(),
       now.getMonth(),
@@ -609,6 +601,7 @@ router.get("/stats/overview/:userId", async (req, res) => {
       0,
       0
     );
+
     const startNextMonth = new Date(
       now.getFullYear(),
       now.getMonth() + 1,
@@ -618,6 +611,7 @@ router.get("/stats/overview/:userId", async (req, res) => {
       0,
       0
     );
+
     const startLastMonth = new Date(
       now.getFullYear(),
       now.getMonth() - 1,
@@ -628,108 +622,182 @@ router.get("/stats/overview/:userId", async (req, res) => {
       0
     );
 
-    const incomeThisMonthAgg = await Income.aggregate([
-      {
-        $match: {
-          user_id: userObjectId,
-          received_date: { $gte: startThisMonth, $lt: startNextMonth },
-          amount: { $gte: 0 },
+    // ===== Aggregate song song =====
+    const [
+      todayAgg,
+      yesterdayAgg,
+      incomeThisMonthAgg,
+      expenseThisMonthAgg,
+      incomeLastMonthAgg,
+      expenseLastMonthAgg,
+    ] = await Promise.all([
+      TransactionHistory.aggregate([
+        {
+          $match: {
+            user_id: userObjectId,
+            transaction_type: "expense",
+            transaction_date: { $gte: startToday, $lte: endToday },
+          },
         },
-      },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]);
-    const expenseThisMonthAgg = await Expense.aggregate([
-      {
-        $match: {
-          user_id: userObjectId,
-          date: { $gte: startThisMonth, $lt: startNextMonth },
-        },
-      },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]);
-    const incomeThisMonth = incomeThisMonthAgg[0]?.total || 0;
-    const expenseThisMonth = expenseThisMonthAgg[0]?.total || 0;
-    const savingsThisMonth = incomeThisMonth - expenseThisMonth;
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]),
 
-    const incomeLastMonthAgg = await Income.aggregate([
-      {
-        $match: {
-          user_id: userObjectId,
-          received_date: { $gte: startLastMonth, $lt: startThisMonth },
-          amount: { $gte: 0 },
+      TransactionHistory.aggregate([
+        {
+          $match: {
+            user_id: userObjectId,
+            transaction_type: "expense",
+            transaction_date: { $gte: startYesterday, $lte: endYesterday },
+          },
         },
-      },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]);
-    const expenseLastMonthAgg = await Expense.aggregate([
-      {
-        $match: {
-          user_id: userObjectId,
-          date: { $gte: startLastMonth, $lt: startThisMonth },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]),
+
+      Income.aggregate([
+        {
+          $match: {
+            user_id: userObjectId,
+            received_date: { $gte: startThisMonth, $lt: startNextMonth },
+            amount: { $gte: 0 },
+          },
         },
-      },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]),
+
+      Expense.aggregate([
+        {
+          $match: {
+            user_id: userObjectId,
+            date: { $gte: startThisMonth, $lt: startNextMonth },
+          },
+        },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]),
+
+      Income.aggregate([
+        {
+          $match: {
+            user_id: userObjectId,
+            received_date: { $gte: startLastMonth, $lt: startThisMonth },
+            amount: { $gte: 0 },
+          },
+        },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]),
+
+      Expense.aggregate([
+        {
+          $match: {
+            user_id: userObjectId,
+            date: { $gte: startLastMonth, $lt: startThisMonth },
+          },
+        },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]),
     ]);
-    const incomeLastMonth = incomeLastMonthAgg[0]?.total || 0;
-    const expenseLastMonth = expenseLastMonthAgg[0]?.total || 0;
-    const savingsLastMonth = incomeLastMonth - expenseLastMonth;
 
-    // Savings percent change vs last month (string with +/-, 2 decimals)
-    const savingsChangeValue = percentChangeValue(
-      savingsThisMonth,
-      savingsLastMonth
-    );
-    const savingsChange = `${
-      savingsChangeValue > 0 ? "+" : ""
-    }${savingsChangeValue}%`;
-    const savingsTrendUp = savingsThisMonth >= savingsLastMonth;
+    const spendingToday = round2(todayAgg[0]?.total || 0);
+    const spendingYesterday = round2(yesterdayAgg[0]?.total || 0);
 
-    // Spending change vs yesterday (keep existing behavior)
-    const spendingChangeValue = percentChangeValue(
+    const incomeThisMonth = round2(incomeThisMonthAgg[0]?.total || 0);
+    const expenseThisMonth = round2(expenseThisMonthAgg[0]?.total || 0);
+
+    const incomeLastMonth = round2(incomeLastMonthAgg[0]?.total || 0);
+    const expenseLastMonth = round2(expenseLastMonthAgg[0]?.total || 0);
+
+    const remainingThisMonth = round2(incomeThisMonth - expenseThisMonth);
+    const remainingLastMonth = round2(incomeLastMonth - expenseLastMonth);
+
+    // ===== Spending today =====
+    const spendingPercentChange = calcPercentChange(
       spendingToday,
       spendingYesterday
     );
-    const spendingChange = `${
-      spendingChangeValue > 0 ? "+" : ""
-    }${spendingChangeValue}%`;
-    const spendingTrendUp = spendingToday <= spendingYesterday; // chi tiêu giảm => tốt
+    const spendingDirection = getDirection(spendingToday, spendingYesterday);
 
-    // budgetRemaining percent of this month's income (0..100 or null)
-    let budgetPercent = null;
-    let budgetRemaining = 0; // Khởi tạo biến cho ngân sách còn lại
+    // Chi tiêu: giảm là tốt
+    const spendingIsPositive =
+      spendingDirection === "down" || spendingDirection === "flat";
+
+    // ===== Remaining this month =====
+    const remainingPercentChange = calcPercentChange(
+      remainingThisMonth,
+      remainingLastMonth
+    );
+    const remainingDirection = getDirection(
+      remainingThisMonth,
+      remainingLastMonth
+    );
+
+    // Tiền còn lại: tăng là tốt
+    const remainingIsPositive =
+      remainingDirection === "up" || remainingDirection === "flat";
+
+    // ===== Budget this month =====
+    let spentPercentOfIncome = null;
+    let remainingPercentOfIncome = null;
+
     if (incomeThisMonth > 0) {
-      const pct = Math.round((balance / incomeThisMonth) * 100);
-      budgetPercent = Math.max(0, Math.min(100, pct)); // Tính phần trăm ngân sách còn lại
-      budgetRemaining = fmt2(balance); // Cập nhật ngân sách còn lại
-    } else {
-      budgetPercent = null; // Nếu không có thu nhập, phần trăm là null
+      spentPercentOfIncome = round2(
+        clamp((expenseThisMonth / incomeThisMonth) * 100, 0, 100)
+      );
+
+      remainingPercentOfIncome = round2(
+        clamp((remainingThisMonth / incomeThisMonth) * 100, 0, 100)
+      );
     }
 
     const result = {
+      period: {
+        today: {
+          start: startToday,
+          end: endToday,
+        },
+        thisMonth: {
+          start: startThisMonth,
+          end: startNextMonth,
+        },
+      },
+
       spendingToday: {
         label: "Chi tiêu hôm nay",
         value: spendingToday,
-        percentOfBalance: spendingTodayPercent, // số (2 decimals) hoặc null
-        trend: spendingChange,
-        trendUp: spendingTrendUp,
+        comparedTo: "yesterday",
+        previousValue: spendingYesterday,
+        percentChange: spendingPercentChange,
+        trend: formatTrend(spendingPercentChange),
+        direction: spendingDirection, // up | down | flat
+        isPositive: spendingIsPositive,
       },
-      savings: {
-        label: "Tiết kiệm được",
-        value: savingsThisMonth,
-        trend: savingsChange, // so sánh với tháng trước
-        trendUp: savingsTrendUp,
-      },
-      budgetRemaining: {
-        label: "Ngân sách còn lại",
-        value: budgetRemaining, // Ngân sách còn lại (số tiền)
-        percentRemaining: budgetPercent, // Phần trăm ngân sách còn lại
+
+     
+
+      budgetThisMonth: {
+        label: "Ngân sách tháng này",
+        income: incomeThisMonth,
+        spent: expenseThisMonth,
+        remaining: remainingThisMonth,
+        spentPercent: spentPercentOfIncome,
+        remainingPercent: remainingPercentOfIncome,
+        status:
+          incomeThisMonth <= 0
+            ? "no_income"
+            : remainingThisMonth < 0
+            ? "overspent"
+            : "within_budget",
       },
     };
 
-    res.status(200).json({ success: true, stats: result });
+    return res.status(200).json({
+      success: true,
+      stats: result,
+    });
   } catch (err) {
     console.error("❌ Lỗi khi lấy stats overview:", err);
-    res.status(500).json({ success: false, message: "Lỗi máy chủ" });
+    return res.status(500).json({
+      success: false,
+      message: "Lỗi máy chủ",
+    });
   }
 });
 

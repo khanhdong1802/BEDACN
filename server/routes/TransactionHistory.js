@@ -4,10 +4,58 @@ const mongoose = require("mongoose");
 const TransactionHistory = require("../models/TransactionHistory");
 const User = require("../models/User");
 
-// GET /api/transactions/user/:userId?date=YYYY-MM-DD
+function isValidDateString(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function buildUtcDayRange(dateStr) {
+  const [y, m, d] = dateStr.split("-").map((v) => parseInt(v, 10));
+  const start = new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0));
+  const end = new Date(Date.UTC(y, m - 1, d, 23, 59, 59, 999));
+
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+    throw new Error("Invalid date value");
+  }
+
+  return { start, end };
+}
+
+function buildUtcMonthRange(year, month) {
+  const y = parseInt(year, 10);
+  const m = parseInt(month, 10);
+
+  if (isNaN(y) || isNaN(m) || m < 1 || m > 12) {
+    throw new Error("Invalid month/year");
+  }
+
+  const start = new Date(Date.UTC(y, m - 1, 1, 0, 0, 0, 0));
+  const end = new Date(Date.UTC(y, m, 0, 23, 59, 59, 999));
+
+  return { start, end };
+}
+
+function buildUtcYearRange(year) {
+  const y = parseInt(year, 10);
+
+  if (isNaN(y)) {
+    throw new Error("Invalid year");
+  }
+
+  const start = new Date(Date.UTC(y, 0, 1, 0, 0, 0, 0));
+  const end = new Date(Date.UTC(y, 11, 31, 23, 59, 59, 999));
+
+  return { start, end };
+}
+
+// GET /api/transactions/user/:userId
+// Supported query:
+// ?date=YYYY-MM-DD
+// ?from=YYYY-MM-DD&to=YYYY-MM-DD
+// ?month=MM&year=YYYY
+// ?year=YYYY
 router.get("/user/:userId", async (req, res) => {
   const { userId } = req.params;
-  const { date } = req.query;
+  const { date, from, to, month, year } = req.query;
   const filter = {};
 
   // convert userId safely
@@ -17,35 +65,77 @@ router.get("/user/:userId", async (req, res) => {
     filter.user_id = userId;
   }
 
-  if (date) {
-    // accept YYYY-MM-DD only
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      return res
-        .status(400)
-        .json({ message: "Invalid date format. Use YYYY-MM-DD" });
-    }
-    try {
-      const [y, m, d] = date.split("-").map((v) => parseInt(v, 10));
-      const start = new Date(Date.UTC(y, m - 1, d, 0, 0, 0));
-      const end = new Date(Date.UTC(y, m - 1, d, 23, 59, 59, 999));
-      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-        return res.status(400).json({ message: "Invalid date value" });
-      }
-      filter.transaction_date = { $gte: start, $lte: end };
-    } catch (err) {
-      console.error("Date parse error:", err);
-      return res.status(400).json({ message: "Invalid date" });
-    }
-  }
-
   try {
+    // 1) Lọc theo đúng 1 ngày
+    if (date) {
+      if (!isValidDateString(date)) {
+        return res
+          .status(400)
+          .json({ message: "Invalid date format. Use YYYY-MM-DD" });
+      }
+
+      const { start, end } = buildUtcDayRange(date);
+      filter.transaction_date = { $gte: start, $lte: end };
+    }
+
+    // 2) Lọc theo khoảng thời gian from -> to
+    else if (from || to) {
+      if (!from || !to) {
+        return res.status(400).json({
+          message: "Both 'from' and 'to' are required. Use YYYY-MM-DD",
+        });
+      }
+
+      if (!isValidDateString(from) || !isValidDateString(to)) {
+        return res.status(400).json({
+          message: "Invalid from/to format. Use YYYY-MM-DD",
+        });
+      }
+
+      const fromRange = buildUtcDayRange(from);
+      const toRange = buildUtcDayRange(to);
+
+      if (fromRange.start > toRange.end) {
+        return res.status(400).json({
+          message: "'from' must be less than or equal to 'to'",
+        });
+      }
+
+      filter.transaction_date = {
+        $gte: fromRange.start,
+        $lte: toRange.end,
+      };
+    }
+
+    // 3) Lọc theo tháng/năm
+    else if (month && year) {
+      const { start, end } = buildUtcMonthRange(year, month);
+      filter.transaction_date = { $gte: start, $lte: end };
+    }
+
+    // 4) Lọc theo năm
+    else if (year) {
+      const { start, end } = buildUtcYearRange(year);
+      filter.transaction_date = { $gte: start, $lte: end };
+    }
+
     const history = await TransactionHistory.find(filter)
       .populate("user_id", "name email")
       .populate("category_id", "name")
       .sort({ transaction_date: -1 });
+
     return res.json(history);
   } catch (err) {
     console.error("Error fetching transaction history:", err);
+
+    if (
+      err.message === "Invalid date value" ||
+      err.message === "Invalid month/year" ||
+      err.message === "Invalid year"
+    ) {
+      return res.status(400).json({ message: err.message });
+    }
+
     return res
       .status(500)
       .json({ message: "Server error fetching transaction history" });
@@ -53,20 +143,97 @@ router.get("/user/:userId", async (req, res) => {
 });
 
 // Lấy toàn bộ lịch sử giao dịch của 1 nhóm (mới nhất trước)
+// GET /api/transactions/group/:groupId
+// Supported query:
+// ?date=YYYY-MM-DD
+// ?from=YYYY-MM-DD&to=YYYY-MM-DD
+// ?month=MM&year=YYYY
+// ?year=YYYY
 router.get("/group/:groupId", async (req, res) => {
   const { groupId } = req.params;
+  const { date, from, to, month, year } = req.query;
+  const filter = {};
+
   if (!mongoose.Types.ObjectId.isValid(groupId)) {
     return res.status(400).json({ message: "ID nhóm không hợp lệ" });
   }
+
+  filter.group_id = new mongoose.Types.ObjectId(groupId);
+
   try {
-    const history = await TransactionHistory.find({ group_id: groupId })
+    // 1) Lọc theo đúng 1 ngày
+    if (date) {
+      if (!isValidDateString(date)) {
+        return res
+          .status(400)
+          .json({ message: "Invalid date format. Use YYYY-MM-DD" });
+      }
+
+      const { start, end } = buildUtcDayRange(date);
+      filter.transaction_date = { $gte: start, $lte: end };
+    }
+
+    // 2) Lọc theo khoảng thời gian
+    else if (from || to) {
+      if (!from || !to) {
+        return res.status(400).json({
+          message: "Both 'from' and 'to' are required. Use YYYY-MM-DD",
+        });
+      }
+
+      if (!isValidDateString(from) || !isValidDateString(to)) {
+        return res.status(400).json({
+          message: "Invalid from/to format. Use YYYY-MM-DD",
+        });
+      }
+
+      const fromRange = buildUtcDayRange(from);
+      const toRange = buildUtcDayRange(to);
+
+      if (fromRange.start > toRange.end) {
+        return res.status(400).json({
+          message: "'from' must be less than or equal to 'to'",
+        });
+      }
+
+      filter.transaction_date = {
+        $gte: fromRange.start,
+        $lte: toRange.end,
+      };
+    }
+
+    // 3) Lọc theo tháng/năm
+    else if (month && year) {
+      const { start, end } = buildUtcMonthRange(year, month);
+      filter.transaction_date = { $gte: start, $lte: end };
+    }
+
+    // 4) Lọc theo năm
+    else if (year) {
+      const { start, end } = buildUtcYearRange(year);
+      filter.transaction_date = { $gte: start, $lte: end };
+    }
+
+    const history = await TransactionHistory.find(filter)
       .populate("user_id", "name email")
+      .populate("category_id", "name")
       .sort({ transaction_date: -1 });
-    res.json(history);
+
+    return res.json(history);
   } catch (err) {
-    res
-      .status(500)
-      .json({ message: "Lỗi máy chủ khi lấy lịch sử giao dịch nhóm" });
+    console.error("Error fetching group transaction history:", err);
+
+    if (
+      err.message === "Invalid date value" ||
+      err.message === "Invalid month/year" ||
+      err.message === "Invalid year"
+    ) {
+      return res.status(400).json({ message: err.message });
+    }
+
+    return res.status(500).json({
+      message: "Lỗi máy chủ khi lấy lịch sử giao dịch nhóm",
+    });
   }
 });
 

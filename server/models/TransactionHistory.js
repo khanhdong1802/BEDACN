@@ -4,7 +4,13 @@ const Schema = mongoose.Schema;
 const TransactionHistorySchema = new Schema({
   transaction_type: {
     type: String,
-    enum: ["expense", "income", "debt_payment", "contribution"],
+    enum: [
+      "expense",
+      "income",
+      "debt_payment",
+      "contribution",
+      "groupExpense",
+    ],
     required: true,
   },
   amount: {

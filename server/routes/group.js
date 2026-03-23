@@ -14,6 +14,48 @@ const mongoose = require("mongoose");
 function isValidId(id) {
   return mongoose.Types.ObjectId.isValid(id);
 }
+async function calculateGroupBalance(groupId) {
+  const fundsInGroup = await GroupFund.find({ group_id: groupId }).select("_id");
+  const fundIdsInGroup = fundsInGroup.map((fund) => fund._id);
+
+  if (fundIdsInGroup.length === 0) {
+    return {
+      balance: 0,
+      totalContributions: 0,
+      totalExpenses: 0,
+    };
+  }
+
+  const contributionData = await GroupContribution.aggregate([
+  {
+    $match: {
+      fund_id: { $in: fundIdsInGroup },
+      status: { $in: ["confirmed", "completed", "pending"] },
+    },
+  },
+  { $group: { _id: null, total: { $sum: "$amount" } } },
+]);
+
+  const expenseData = await GroupExpense.aggregate([
+    {
+      $match: {
+        fund_id: { $in: fundIdsInGroup },
+        approval_status: "approved",
+      },
+    },
+    { $group: { _id: null, total: { $sum: "$amount" } } },
+  ]);
+
+  const totalContributions = contributionData[0]?.total || 0;
+  const totalExpenses = expenseData[0]?.total || 0;
+
+  return {
+    balance: totalContributions - totalExpenses,
+    totalContributions,
+    totalExpenses,
+  };
+}
+
 //=========================================================
 // POST /api/group/invitations
 router.post("/invitations", async (req, res) => {
@@ -422,12 +464,13 @@ router.post("/group-contributions", async (req, res) => {
     }
 
     // 2. Lưu contribution vào quỹ vừa tìm/đã tạo
-    const contribution = await GroupContribution.create({
-      fund_id: fund._id,
-      member_id,
-      amount,
-      payment_method,
-    });
+   const contribution = await GroupContribution.create({
+  fund_id: fund._id,
+  member_id,
+  amount,
+  payment_method,
+  status: "confirmed",
+});
 
     // Trừ số dư cá nhân: tạo bản ghi âm trong Income
     await Income.create({
@@ -531,44 +574,29 @@ router.post("/group-expenses", async (req, res) => {
     const groupIdForBalanceCheck = groupFundDoc.group_id;
 
     // --- KIỂM TRA SỐ DƯ TỔNG CỦA NHÓM ---
-    const fundsInGroup = await GroupFund.find({
-      group_id: groupIdForBalanceCheck,
-    }).select("_id");
-    const fundIdsInGroup = fundsInGroup.map((fund) => fund._id);
+const fundsInGroup = await GroupFund.find({
+  group_id: groupIdForBalanceCheck,
+}).select("_id");
 
-    let actualGroupBalance = 0;
-    if (fundIdsInGroup.length > 0) {
-      const contributionData = await GroupContribution.aggregate([
-        { $match: { fund_id: { $in: fundIdsInGroup }, status: "pending" } },
-        { $group: { _id: null, total: { $sum: "$amount" } } },
-      ]);
-      const totalContributions = contributionData[0]?.total || 0;
+const fundIdsInGroup = fundsInGroup.map((fund) => fund._id);
 
-      const expenseData = await GroupExpense.aggregate([
-        {
-          $match: {
-            fund_id: { $in: fundIdsInGroup },
-            approval_status: "approved",
-          },
-        },
-        { $group: { _id: null, total: { $sum: "$amount" } } },
-      ]);
-      const totalExpenses = expenseData[0]?.total || 0;
-      actualGroupBalance = totalContributions - totalExpenses;
-    } else if (numericAmount > 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Nhóm này không có quỹ nào để ghi nhận chi tiêu.",
-      });
-    }
+if (fundIdsInGroup.length === 0) {
+  return res.status(400).json({
+    success: false,
+    message: "Nhóm này không có quỹ nào để ghi nhận chi tiêu.",
+  });
+}
 
-    // --- THÊM ĐOẠN CODE KIỂM TRA SỐ DƯ BẠN CUNG CẤP VÀO ĐÂY ---
-    if (actualGroupBalance < numericAmount) {
-      return res.status(400).json({
-        success: false,
-        message: `Số dư tài khoản nhóm không đủ. Hiện có: ${actualGroupBalance.toLocaleString()} đ`,
-      });
-    }
+const { balance: actualGroupBalance } = await calculateGroupBalance(
+  groupIdForBalanceCheck
+);
+
+if (actualGroupBalance < numericAmount) {
+  return res.status(400).json({
+    success: false,
+    message: `Số dư tài khoản nhóm không đủ. Hiện có: ${actualGroupBalance.toLocaleString()} đ`,
+  });
+}
     // --- KẾT THÚC KIỂM TRA SỐ DƯ NHÓM ---
 
     // --- TÌM GROUPMEMBER ID CHO BẢN GHI GROUPEXPENSE ---
@@ -604,15 +632,16 @@ router.post("/group-expenses", async (req, res) => {
 
     // Ghi vào lịch sử giao dịch nhóm
     const now = new Date();
-    await TransactionHistory.create({
-      transaction_type: "expense",
-      amount: numericAmount,
-      transaction_date: now,
-      description: description || "Chi tiêu nhóm",
-      user_id: user_making_expense_id,
-      group_id: groupIdForBalanceCheck,
-      status: "completed",
-    });
+  await TransactionHistory.create({
+  transaction_type: "groupExpense",
+  amount: numericAmount,
+  transaction_date: now,
+  description: description || "Chi tiêu nhóm",
+  user_id: user_making_expense_id,
+  group_id: groupIdForBalanceCheck,
+  category_id: category_id || null,
+  status: "completed",
+});
 
     // Quan trọng: Đảm bảo không có code tạo Income âm cho user_making_expense_id ở đây
     // để không trừ tiền cá nhân khi chi từ tài khoản nhóm.
@@ -684,22 +713,7 @@ router.post("/group-funds", async (req, res) => {
   }
 });
 
-router.get("/group-funds", async (req, res) => {
-  try {
-    const { groupId } = req.query;
-    if (!isValidId(groupId)) {
-      return res.status(400).json({ error: "ID không hợp lệ" });
-    }
 
-    const funds = await GroupFund.find({ group_id: groupId }).sort({
-      created_at: -1,
-    });
-    res.json({ funds });
-  } catch (err) {
-    console.error("❌ Lỗi lấy danh sách quỹ:", err);
-    res.status(500).json({ error: "Lỗi máy chủ" });
-  }
-});
 
 router.get("/group-funds", async (req, res) => {
   try {
@@ -725,15 +739,9 @@ router.get("/groups/:groupId/balance", async (req, res) => {
     if (!isValidId(groupId)) {
       return res.status(400).json({ error: "ID không hợp lệ" });
     }
-    // Lấy tất cả fund_id của nhóm
-    const funds = await GroupFund.find({ group_id: groupId }).select("_id");
-    const fundIds = funds.map((f) => f._id);
-    const result = await GroupContribution.aggregate([
-      { $match: { fund_id: { $in: fundIds } } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]);
-    const balance = result[0]?.total || 0;
-    res.json({ balance });
+
+    const result = await calculateGroupBalance(groupId);
+    res.json({ balance: result.balance });
   } catch (err) {
     res.status(500).json({ error: "Lỗi máy chủ" });
   }
@@ -756,53 +764,22 @@ router.get("/:id", async (req, res) => {
 router.get("/groups/:groupId/actual-balance", async (req, res) => {
   try {
     const { groupId } = req.params;
+
     if (!mongoose.Types.ObjectId.isValid(groupId)) {
       return res
         .status(400)
         .json({ success: false, message: "ID nhóm không hợp lệ." });
     }
+
     const groupObjectId = new mongoose.Types.ObjectId(groupId);
 
-    // Lấy tất cả các fund_id thuộc nhóm này
-    const fundsInGroup = await GroupFund.find({
-      group_id: groupObjectId,
-    }).select("_id");
-    const fundIdsInGroup = fundsInGroup.map((fund) => fund._id);
+    const result = await calculateGroupBalance(groupObjectId);
 
-    if (fundIdsInGroup.length === 0) {
-      // Nếu nhóm không có quỹ nào, số dư là 0 (hoặc bạn có thể cho phép đóng góp trực tiếp vào nhóm mà không cần quỹ)
-      return res.json({ success: true, balance: 0 });
-    }
-
-    // Tính tổng đóng góp đã xác nhận cho tất cả các quỹ trong nhóm
-    const contributionData = await GroupContribution.aggregate([
-      {
-        $match: {
-          fund_id: { $in: fundIdsInGroup },
-          status: "pending",
-        },
-      },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]);
-    const totalContributions = contributionData[0]?.total || 0;
-
-    // Tính tổng chi tiêu đã duyệt cho tất cả các quỹ trong nhóm
-    const expenseData = await GroupExpense.aggregate([
-      {
-        $match: {
-          fund_id: { $in: fundIdsInGroup },
-          approval_status: "approved",
-        },
-      },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]);
-    const totalExpenses = expenseData[0]?.total || 0;
-
-    const actualGroupBalance = totalContributions - totalExpenses;
     res.json({
       success: true,
-      balance: actualGroupBalance,
-      totalSpent: totalExpenses,
+      balance: result.balance,
+      totalContributions: result.totalContributions,
+      totalSpent: result.totalExpenses,
     });
   } catch (err) {
     console.error("Lỗi khi lấy số dư tổng của nhóm:", err);
@@ -947,40 +924,14 @@ router.get("/groups/all", async (req, res) => {
           group_id: g._id,
         });
 
-        const funds = await GroupFund.find({ group_id: g._id }).select("_id");
-        const fundIds = funds.map((f) => f._id);
-
-        let balance = 0;
-        if (fundIds.length > 0) {
-          const contrib = await GroupContribution.aggregate([
-            {
-              $match: {
-                fund_id: { $in: fundIds },
-                status: { $in: ["pending", "confirmed", "completed"] },
-              },
-            },
-            { $group: { _id: null, total: { $sum: "$amount" } } },
-          ]);
-          const expenses = await GroupExpense.aggregate([
-            {
-              $match: {
-                fund_id: { $in: fundIds },
-                approval_status: "approved",
-              },
-            },
-            { $group: { _id: null, total: { $sum: "$amount" } } },
-          ]);
-          const totalContrib = contrib[0]?.total || 0;
-          const totalExpenses = expenses[0]?.total || 0;
-          balance = totalContrib - totalExpenses;
-        }
+        const result = await calculateGroupBalance(g._id);
 
         return {
           id: g._id,
           name: g.name,
           owner: g.created_by ? g.created_by.name : null,
           members: memberCount,
-          balance,
+          balance: result.balance,
         };
       })
     );
