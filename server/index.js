@@ -16,6 +16,7 @@ const adminCategoryRouter = require("./routes/admin/category");
 const adminUserRouter = require("./routes/admin/user");
 const transactionHistoryRouter = require("./routes/TransactionHistory");
 const userRoutes = require("./routes/admin/userRoutes");
+const chatbotRoutes = require("./routes/chatbot");
 
 const app = express(); // 🔥 phải tạo app trước
 const server = http.createServer(app);
@@ -28,7 +29,7 @@ app.use("/uploads", express.static("uploads"));
 
 mongoose
   .connect(process.env.MONGO_URI || "")
-  .then(() => console.log("✅ MongoDB connected"))
+  .then(() => console.log("MongoDB connected"))
   .catch((err) => {
     console.error(err);
     process.exit(1);
@@ -53,6 +54,7 @@ app.use("/api/admin/users", adminUserRouter);
 app.use("/api/transactions", transactionHistoryRouter);
 app.use("/api/admin", userRoutes);
 app.use("/api/admin", adminStatsRouter);
+app.use("/api/chatbot", chatbotRoutes);
 
 const io = new Server(server, {
   cors: { origin: "*" },
@@ -62,5 +64,5 @@ initSocket(io);
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`🚀 Server + Socket chạy tại http://localhost:${PORT}`);
+  console.log(`Server + Socket chạy tại http://localhost:${PORT}`);
 });
