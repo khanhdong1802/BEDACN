@@ -9,7 +9,7 @@ const router = express.Router();
 // ------------------------
 router.get("/", async (req, res) => {
   try {
-    const categories = await Category.find().sort({ name: 1 }); // Sắp xếp A-Z
+    const categories = await Category.find().sort({ name: 1 });
     res.json(categories);
   } catch (err) {
     console.error("❌ Lấy categories lỗi:", err);
@@ -21,20 +21,41 @@ router.get("/", async (req, res) => {
 // Tạo mới một danh mục
 // ------------------------
 router.post("/", async (req, res) => {
-  const { name, description, icon, parent_category_id } = req.body;
-  if (!name) return res.status(400).json({ message: "Thiếu name" });
+  const {
+    name,
+    description,
+    icon,
+    color,
+    limit,
+    parent_category_id,
+  } = req.body;
+
+  if (!name || !name.trim()) {
+    return res.status(400).json({ message: "Tên danh mục không được để trống" });
+  }
 
   try {
+    const existed = await Category.findOne({
+      name: name.trim(),
+    });
+
+    if (existed) {
+      return res.status(400).json({ message: "Danh mục này đã tồn tại" });
+    }
+
     const newCat = new Category({
-      name,
-      description,
-      icon,
+      name: name.trim(),
+      description: description || "",
+      icon: icon || "",
+      color: color || "",
+      limit: limit ?? null,
       parent_category_id: parent_category_id
         ? new mongoose.Types.ObjectId(parent_category_id)
         : null,
     });
 
     await newCat.save();
+
     res.status(201).json(newCat);
   } catch (err) {
     console.error("❌ Tạo category lỗi:", err);
@@ -47,12 +68,46 @@ router.post("/", async (req, res) => {
 // ------------------------
 router.put("/:id", async (req, res) => {
   const { id } = req.params;
-  const { name, description, icon, parent_category_id } = req.body;
+
+  const {
+    name,
+    description,
+    icon,
+    color,
+    limit,
+    parent_category_id,
+  } = req.body;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ message: "ID danh mục không hợp lệ" });
+  }
+
+  if (!name || !name.trim()) {
+    return res.status(400).json({ message: "Tên danh mục không được để trống" });
+  }
 
   try {
+    const existed = await Category.findOne({
+      _id: { $ne: id },
+      name: name.trim(),
+    });
+
+    if (existed) {
+      return res.status(400).json({ message: "Tên danh mục đã tồn tại" });
+    }
+
     const updatedCategory = await Category.findByIdAndUpdate(
       id,
-      { name, description, icon, parent_category_id },
+      {
+        name: name.trim(),
+        description: description || "",
+        icon: icon || "",
+        color: color || "",
+        limit: limit ?? null,
+        parent_category_id: parent_category_id
+          ? new mongoose.Types.ObjectId(parent_category_id)
+          : null,
+      },
       { new: true }
     );
 
@@ -72,6 +127,10 @@ router.put("/:id", async (req, res) => {
 // ------------------------
 router.delete("/:id", async (req, res) => {
   const { id } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ message: "ID danh mục không hợp lệ" });
+  }
 
   try {
     const deletedCategory = await Category.findByIdAndDelete(id);
